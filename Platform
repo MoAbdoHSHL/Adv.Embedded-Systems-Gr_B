@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartFit Trainer</title>
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Segoe UI', sans-serif;
+            background: #0f0f1a;
+            color: white;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        h1 {
+            font-size: 28px;
+            margin: 20px 0 5px;
+            letter-spacing: 2px;
+        }
+
+        .subtitle {
+            font-size: 13px;
+            color: #888;
+            margin-bottom: 30px;
+            letter-spacing: 1px;
+        }
+
+        .status {
+            font-size: 12px;
+            padding: 6px 16px;
+            border-radius: 20px;
+            margin-bottom: 30px;
+            background: #1e1e2e;
+            border: 1px solid #333;
+        }
+
+        .status.connected { color: #4ade80; border-color: #4ade80; }
+        .status.disconnected { color: #f87171; border-color: #f87171; }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            width: 100%;
+            max-width: 500px;
+        }
+
+        .card {
+            background: #1e1e2e;
+            border-radius: 16px;
+            padding: 24px;
+            text-align: center;
+            border: 1px solid #2a2a3e;
+            transition: border-color 0.3s;
+        }
+
+        .card.full { grid-column: span 2; }
+
+        .card-label {
+            font-size: 11px;
+            color: #888;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        .card-value {
+            font-size: 52px;
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .card-unit {
+            font-size: 14px;
+            color: #888;
+            margin-top: 6px;
+        }
+
+        .zone-badge {
+            display: inline-block;
+            padding: 8px 24px;
+            border-radius: 30px;
+            font-size: 16px;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        .alert-box {
+            width: 100%;
+            max-width: 500px;
+            background: #2d1b1b;
+            border: 1px solid #f87171;
+            border-radius: 12px;
+            padding: 16px;
+            text-align: center;
+            color: #f87171;
+            font-weight: 600;
+            margin-top: 16px;
+            display: none;
+        }
+
+        .alert-box.show { display: block; }
+
+        .zone-1 { background: #1e3a5f; color: #60a5fa; }
+        .zone-2 { background: #1a3a2a; color: #4ade80; }
+        .zone-3 { background: #3a3a1a; color: #facc15; }
+        .zone-4 { background: #3a2a1a; color: #fb923c; }
+        .zone-5 { background: #3a1a1a; color: #f87171; }
+    </style>
+</head>
+<body>
+
+    <h1>💪 SmartFit Trainer</h1>
+    <p class="subtitle">REAL-TIME FITNESS MONITOR</p>
+
+    <div class="status disconnected" id="status">● Disconnected</div>
+
+    <div class="grid">
+        <div class="card full">
+            <div class="card-label">Heart Rate</div>
+            <div class="card-value" id="bpm">--</div>
+            <div class="card-unit">BPM</div>
+        </div>
+
+        <div class="card">
+            <div class="card-label">HR Zone</div>
+            <div id="zone-badge" class="zone-badge zone-1">Zone --</div>
+            <div class="card-unit" id="zone-name">--</div>
+        </div>
+
+        <div class="card">
+            <div class="card-label">Steps</div>
+            <div class="card-value" id="steps">0</div>
+            <div class="card-unit">steps</div>
+        </div>
+    </div>
+
+    <div class="alert-box" id="alert">
+        ⚠️ DANGER ZONE! BPM too high — slow down!
+    </div>
+
+    <script>
+        const brokerIP = "172.20.10.3"; // Your Pi IP address
+        const port = 9001; // WebSocket port
+
+        const zoneNames = {
+            "1": "Rest",
+            "2": "Fat Burn",
+            "3": "Cardio",
+            "4": "Hard",
+            "5": "Maximum"
+        };
+
+        const zoneColors = {
+            "1": "zone-1",
+            "2": "zone-2",
+            "3": "zone-3",
+            "4": "zone-4",
+            "5": "zone-5"
+        };
+
+        const client = mqtt.connect(`ws://${brokerIP}:${port}`);
+
+        client.on('connect', () => {
+            document.getElementById('status').textContent = '● Connected';
+            document.getElementById('status').className = 'status connected';
+            client.subscribe('smartfit/#');
+        });
+
+        client.on('disconnect', () => {
+            document.getElementById('status').textContent = '● Disconnected';
+            document.getElementById('status').className = 'status disconnected';
+        });
+
+        client.on('message', (topic, message) => {
+            const value = message.toString();
+
+            if (topic === 'smartfit/vitals/bpm') {
+                document.getElementById('bpm').textContent = value;
+            }
+
+            if (topic === 'smartfit/vitals/zone') {
+                const badge = document.getElementById('zone-badge');
+                badge.textContent = `Zone ${value}`;
+                badge.className = `zone-badge ${zoneColors[value] || 'zone-1'}`;
+                document.getElementById('zone-name').textContent = zoneNames[value] || '--';
+            }
+
+            if (topic === 'smartfit/motion/steps') {
+                document.getElementById('steps').textContent = value;
+            }
+
+            if (topic === 'smartfit/alerts/danger') {
+                document.getElementById('alert').classList.add('show');
+                setTimeout(() => {
+                    document.getElementById('alert').classList.remove('show');
+                }, 5000);
+            }
+        });
+    </script>
+
+</body>
+</html>
