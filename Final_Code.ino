@@ -1,3 +1,15 @@
+/*
+ * ============================================================
+ * Adv. Embedded Systems Labs & Project — Gr_B2
+ * Rionela Kovaci | Christian Percival | Mohamed Abdo
+ * ============================================================
+ * SmartFit ESP32 — Wearable fitness tracker
+ * Reads heart rate (analog pulse sensor) and step count (tilt switch),
+ * computes BPM via peak detection + rolling average, and maps it to
+ * 5 heart-rate zones with RGB LED + buzzer feedback.
+ * Publishes vitals/steps/alerts over WiFi to an MQTT broker (topics under "smartfit/").
+ */
+ 
 #include <WiFi.h>
 #include <PubSubClient.h>
 
@@ -10,19 +22,18 @@ const char* mqtt_server = "172.20.10.3";
 #define LED_RED 12
 #define LED_GREEN 11
 #define LED_BLUE 10
+#define BUZZER_PIN 6
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 int stepCount = 0;
 bool lastTiltState = HIGH;
-int rawValue = 0;
-int maxValue = 0;
-bool isPeak = false;
-int beatMsec = 0;
-unsigned long lastLoopTime = 0;
 unsigned long lastReconnect = 0;
+
 const int delayMsec = 60;
+unsigned long lastBeatTime = 0;
+int rawValue = 0;
 
 #define BPM_BUFFER_SIZE 5
 int bpmBuffer[BPM_BUFFER_SIZE];
@@ -36,12 +47,31 @@ void setLEDColor(int r, int g, int b) {
 }
 
 void setHRZone(int bpm) {
-  if (bpm < 100)      { setLEDColor(0,0,255);   client.publish("smartfit/vitals/zone","1"); }
-  else if (bpm < 120) { setLEDColor(0,255,0);   client.publish("smartfit/vitals/zone","2"); }
-  else if (bpm < 140) { setLEDColor(255,255,0); client.publish("smartfit/vitals/zone","3"); }
-  else if (bpm < 160) { setLEDColor(255,165,0); client.publish("smartfit/vitals/zone","4"); }
+  if (bpm < ((100))) {
+    setLEDColor(0,0,255);
+    digitalWrite(BUZZER_PIN, LOW);
+    client.publish("smartfit/vitals/zone","1");
+  }
+  else if (bpm < 120) {
+    setLEDColor(0,255,0);
+    digitalWrite(BUZZER_PIN, LOW);
+    client.publish("smartfit/vitals/zone","2");
+  }
+  else if (bpm < 140) {
+    setLEDColor(255,255,0);
+    digitalWrite(BUZZER_PIN, LOW);
+    client.publish("smartfit/vitals/zone","3");
+  }
+  else if (bpm < 160) {
+    setLEDColor(255,165,0);
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(150);
+    digitalWrite(BUZZER_PIN, LOW);
+    client.publish("smartfit/vitals/zone","4");
+  }
   else {
     setLEDColor(255,0,0);
+    digitalWrite(BUZZER_PIN, HIGH);
     client.publish("smartfit/vitals/zone","5");
     client.publish("smartfit/alerts/danger","1");
   }
@@ -57,19 +87,38 @@ int getAverageBPM(int newBpm) {
   return sum / bpmCount;
 }
 
-bool heartbeatDetected() {
+// thresholds scaled x4 for ESP32's 12-bit ADC
+bool heartbeatDetected(int sensorPin, int sampleDelay) {
+  static int maxValue = 0;
+  static bool isPeak = false;
+  static unsigned long lastBeatMs = 0;
   bool result = false;
-  rawValue = analogRead(HEART_PIN);
-  rawValue *= (1000 / delayMsec);
+
+  rawValue = analogRead(sensorPin);
+  rawValue *= (1000 / sampleDelay);
+
   if (rawValue * 4L < maxValue) maxValue = rawValue * 0.8;
-  if (rawValue > maxValue - (500 / delayMsec)) {
+
+  if (rawValue > maxValue - (4000 / sampleDelay)) {
     if (rawValue > maxValue) maxValue = rawValue;
-    if (!isPeak) result = true;
+    if (!isPeak) {
+      result = true;
+      lastBeatMs = millis();
+    }
     isPeak = true;
-  } else if (rawValue < maxValue - (4000 / delayMsec)) {
+  } else if (rawValue < maxValue - (12000 / sampleDelay)) {
     isPeak = false;
-    maxValue -= (1000 / delayMsec);
+    maxValue -= (4000 / sampleDelay);
   }
+
+  // If stuck with no beat for 3 seconds, force a clean reset
+  if (millis() - lastBeatMs > 3000) {
+    maxValue = rawValue;
+    isPeak = false;
+    lastBeatMs = millis();
+    lastBeatTime = 0;   // <-- also reset the BPM timer so the next real beat re-seeds cleanly
+  }
+
   return result;
 }
 
@@ -107,13 +156,16 @@ void setup() {
   pinMode(LED_BLUE, OUTPUT);
   pinMode(TILT_PIN, INPUT);
   pinMode(LED_BUILTIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
   setLEDColor(0, 0, 255);
 
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.begin(ssid, password);
   Serial.print("Connecting to WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
     delay(500);
     Serial.print(".");
   }
@@ -121,31 +173,23 @@ void setup() {
 
   client.setServer(mqtt_server, 1883);
   client.setKeepAlive(60);
-
-  Serial.print("Connecting to MQTT...");
-  while (!client.connected()) {
-    String clientId = "SmartFitESP32-" + String(random(0xffff), HEX);
-    if (client.connect(clientId.c_str())) {
-      Serial.println("connected!");
-    } else {
-      Serial.print("failed rc="); Serial.print(client.state()); Serial.println(" retrying...");
-      delay(3000);
-    }
-  }
 }
 
 void loop() {
   if (!client.connected()) reconnectMQTT();
   client.loop();
 
-  unsigned long now = millis();
-  if (now - lastLoopTime >= (unsigned long)delayMsec) {
-    lastLoopTime = now;
+  if (heartbeatDetected(HEART_PIN, delayMsec)) {
+    unsigned long now = millis();
 
-    if (heartbeatDetected()) {
-      if (beatMsec > 0) {
-        int rawBpm = 60000 / beatMsec;
-        int avgBpm = getAverageBPM(rawBpm);
+    if (lastBeatTime == 0) {
+      lastBeatTime = now;
+    } else {
+      int beatInterval = now - lastBeatTime;
+      if (beatInterval > 350 && beatInterval < 2000) {
+        lastBeatTime = now;
+        int bpm = 60000 / beatInterval;
+        int avgBpm = getAverageBPM(bpm);
         if (avgBpm > 0) {
           Serial.print("BPM: "); Serial.println(avgBpm);
           char bpmStr[8];
@@ -154,10 +198,9 @@ void loop() {
           setHRZone(avgBpm);
         }
       }
-      beatMsec = 0;
     }
-
-    readSteps();
-    beatMsec += delayMsec;
   }
+
+  readSteps();
+  delay(delayMsec);
 }
